@@ -12,6 +12,7 @@ ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "YOUR_ADMIN_USERNAME")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "123456789"))  # Numeric Telegram User ID
 UPI_ID = os.environ.get("UPI_ID", "YOUR_UPI_ID@upi")
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "-1002564797463")  # Optional: @YourChannelUsername or -100xxxxxxxxx
+DEFAULT_START_PHOTO = os.environ.get("START_PHOTO", "https://iili.io/CkUKz7a.jpg") # Welcome Image URL
 PORT = int(os.environ.get("PORT", 8080))
 
 DATA_FILE = "files_data.json"
@@ -77,17 +78,24 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not files_data:
         msg = "<b>👋 Welcome to Movie Store Bot!</b>\n\n<i>Abhi koi movie available nahi hai.</i>"
         keyboard.append([InlineKeyboardButton("💬 Admin Support", url=f"https://t.me/{ADMIN_USERNAME}")])
-        await update.message.reply_text(msg, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        try:
+            await update.message.reply_photo(photo=DEFAULT_START_PHOTO, caption=msg, parse_mode='HTML', reply_markup=reply_markup)
+        except Exception:
+            await update.message.reply_text(msg, parse_mode='HTML', reply_markup=reply_markup)
     else:
         for f_id, f_data in files_data.items():
             keyboard.append([InlineKeyboardButton(f"🎬 {f_data['name']} - {f_data['price']}", callback_data=f"file_{f_id}")])
         
         keyboard.append([InlineKeyboardButton("💬 Admin Support", url=f"https://t.me/{ADMIN_USERNAME}")])
-        msg = "<b>👋 Welcome to Movie Store Bot!</b>\n\nNiche di gayi list me se movie select karein:"
+        msg = "<b>👋 Welcome to Movie Store Bot!</b>\n\nNiche di gayi list me se apni pasandida movie select karein:"
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        # Send start message
-        await update.message.reply_text(msg, parse_mode='HTML', reply_markup=reply_markup)
+        # Welcome message send with Photo
+        try:
+            await update.message.reply_photo(photo=DEFAULT_START_PHOTO, caption=msg, parse_mode='HTML', reply_markup=reply_markup)
+        except Exception:
+            await update.message.reply_text(msg, parse_mode='HTML', reply_markup=reply_markup)
 
 async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -106,8 +114,8 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             price_number = ''.join(filter(str.isdigit, selected["price"]))
             qr_url = f"https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=upi://pay?pa={UPI_ID}&pn=MovieStore&am={price_number}"
 
-            poster_url = selected.get("poster", qr_url)
-            imdb_link = selected.get("imdb", "N/A")
+            poster_url = selected.get("poster", DEFAULT_START_PHOTO)
+            imdb_link = selected.get("imdb", "https://imdb.com")
             details = selected.get("details", "HD Movie")
 
             caption = (
@@ -117,8 +125,8 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"⭐ <b>IMDB Info:</b> <a href='{imdb_link}'>Click Here To Check IMDB</a>\n\n"
                 f"💳 <b>Payment Details:</b>\n"
                 f"<b>UPI ID:</b> <code>{UPI_ID}</code>\n\n"
-                f"📌 <b>Direct Video Paane Ke Liye:</b>\n"
-                f"1. Upar QR code scan karke {selected['price']} pay karein.\n"
+                f"📌 <b>Direct Video File Paane Ke Liye:</b>\n"
+                f"1. QR code scan karke {selected['price']} pay karein.\n"
                 f"2. <b>Payment ka Screenshot ISI BOT CHAT me photo bhej dein.</b>\n"
                 f"3. Verification hote hi Bot aapko Direct Video File bhej dega."
             )
@@ -139,7 +147,10 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard.append([InlineKeyboardButton("💬 Admin Support", url=f"https://t.me/{ADMIN_USERNAME}")])
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        await query.message.reply_text("<b>👋 Main Menu:</b>\nMovie select karein:", parse_mode='HTML', reply_markup=reply_markup)
+        try:
+            await query.message.reply_photo(photo=DEFAULT_START_PHOTO, caption="<b>👋 Main Menu:</b>\nMovie select karein:", parse_mode='HTML', reply_markup=reply_markup)
+        except Exception:
+            await query.message.reply_text("<b>👋 Main Menu:</b>\nMovie select karein:", parse_mode='HTML', reply_markup=reply_markup)
 
     elif data.startswith("approve_"):
         _, target_user_id, file_id = data.split("_")
@@ -166,7 +177,7 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await context.bot.send_message(chat_id=int(target_user_id), text=f"🎉 <b>Payment Verified!</b>\n\nLink: {file_link}", parse_mode='HTML')
                     await query.edit_message_caption(caption=query.message.caption + "\n\n⚠️ Approved with Link (Parsing Failed)")
             except Exception as e:
-                await query.edit_message_caption(caption=query.message.caption + f"\n\n❌ Error sending video file: {str(e)}")
+                await query.edit_message_caption(caption=query.message.caption + f"\n\n❌ Error sending video file: {str(e)}\n\n<i>Check if bot is Admin in your Private Channel!</i>")
 
 # --- PHOTO RECEIVER ---
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -340,6 +351,6 @@ if __name__ == '__main__':
     bot_app.add_handler(CommandHandler("stats", stats))
     bot_app.add_handler(CommandHandler("broadcast", broadcast))
 
-    print("Bot is running fully automated with Poster & Details...")
+    print("Bot is running fully automated with Welcome Photo & Direct File Delivery...")
     bot_app.run_polling()
     
