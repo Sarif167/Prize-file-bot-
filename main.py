@@ -1,5 +1,6 @@
 import os
 import json
+import re
 from flask import Flask
 from threading import Thread
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -28,6 +29,23 @@ def load_files():
 def save_files(data):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=4, ensure_ascii=False)
+
+# Telegram Channel Link Parser Helper
+def parse_telegram_link(link):
+    # Example link: https://t.me/c/2076498781/8712 or https://t.me/channelname/8712
+    pattern = r"https://t\.me/(?:c/)?([^/]+)/(\d+)"
+    match = re.search(pattern, link)
+    if match:
+        chat_id_raw = match.group(1)
+        message_id = int(match.group(2))
+        
+        if chat_id_raw.isdigit():
+            chat_id = int("-100" + chat_id_raw)
+        else:
+            chat_id = "@" + chat_id_raw
+            
+        return chat_id, message_id
+    return None, None
 
 # --- DUMMY FLASK SERVER FOR KOYEB PORT BINDING ---
 app = Flask(__name__)
@@ -67,7 +85,7 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_id = data.split("_")[1]
         if file_id in files_data:
             selected = files_data[file_id]
-            USER_SELECTIONS[user_id] = file_id  # Track which file user selected
+            USER_SELECTIONS[user_id] = file_id  # Track user choice
             
             price_number = ''.join(filter(str.isdigit, selected["price"]))
             qr_url = f"https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=upi://pay?pa={UPI_ID}&pn=MovieStore&am={price_number}"
@@ -79,7 +97,7 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"📝 <b>Details:</b>\n{selected.get('details', 'HD Movie')}\n\n"
                 f"💳 <b>Payment Details:</b>\n"
                 f"<b>UPI ID:</b> <code>{UPI_ID}</code>\n\n"
-                f"📌 <b>File Paane Ke Liye:</b>\n"
+                f"📌 <b>Direct Video Paane Ke Liye:</b>\n"
                 f"1. QR code scan karke {selected['price']} pay karein.\n"
                 f"2. <b>Payment ka Screenshot ISI BOT CHAT me photo bhej dein.</b>\n"
                 f"3. Verification hote hi Bot aapko Direct Video File bhej dega."
@@ -109,27 +127,34 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             file_info = files_data[file_id]
             file_link = file_info.get("file_link", "")
 
-            try:
-                # Member ko message/file bhejna
-                msg = (
-                    f"🎉 <b>Payment Verified Successfully!</b>\n\n"
-                    f"🎬 <b>Movie:</b> {file_info['name']}\n"
-                    f"📥 <b>Download / Access Link:</b>\n{file_link}\n\n"
-                    f"<i>Thank you for buying! Enjoy your movie.</i>"
-                )
-                await context.bot.send_message(chat_id=int(target_user_id), text=msg, parse_mode='HTML')
-                await query.edit_message_caption(caption=query.message.caption + "\n\n✅ <b>APPROVED & FILE SENT TO MEMBER!</b>")
-            except Exception as e:
-                await query.edit_message_caption(caption=f"❌ Error sending file: {str(e)}")
+            from_chat_id, message_id = parse_telegram_link(file_link)
 
-# --- PHOTO / SCREENSHOT RECEIVER HANDLER ---
+            try:
+                if from_chat_id and message_id:
+                    # DIRECT VIDEO FILE COPY KARKE USER KO BHEJNA
+                    await context.bot.copy_message(
+                        chat_id=int(target_user_id),
+                        from_chat_id=from_chat_id,
+                        message_id=message_id,
+                        caption=f"🎉 <b>Here is your movie:</b> {file_info['name']}\n\n<i>Enjoy your movie!</i>",
+                        parse_mode='HTML'
+                    )
+                    await query.edit_message_caption(caption=query.message.caption + "\n\n✅ <b>APPROVED & DIRECT VIDEO FILE SENT TO MEMBER!</b>")
+                else:
+                    # Fallback text message if link parsing fails
+                    await context.bot.send_message(chat_id=int(target_user_id), text=f"🎉 <b>Payment Verified!</b>\n\nLink: {file_link}", parse_mode='HTML')
+                    await query.edit_message_caption(caption=query.message.caption + "\n\n⚠️ Approved with Link (Parsing Failed)")
+            except Exception as e:
+                await query.edit_message_caption(caption=query.message.caption + f"\n\n❌ Error sending video file: {str(e)}\n\n<i>Make sure Bot is Admin in your Private Channel!</i>")
+
+# --- PHOTO RECEIVER ---
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id
     files_data = load_files()
 
     if user_id == ADMIN_ID:
-        return  # Ignore admin sending photos
+        return
 
     selected_file_id = USER_SELECTIONS.get(user_id)
     if not selected_file_id or selected_file_id not in files_data:
@@ -138,10 +163,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     selected_movie = files_data[selected_file_id]
 
-    # Member ko confirmation
-    await update.message.reply_text("⏳ <b>Screenshot mil gaya hai!</b>\nAdmin verify kar rahe hain. 1-2 min me aapko video file mil jayegi.", parse_mode='HTML')
+    await update.message.reply_text("⏳ <b>Screenshot mil gaya hai!</b>\nAdmin verify kar rahe hain. 1-2 min me aapko direct video file mil jayegi.", parse_mode='HTML')
 
-    # Admin ko notification & Photo forward karna
     caption_for_admin = (
         f"🚨 <b>NEW PAYMENT SCREENSHOT!</b>\n\n"
         f"👤 <b>User:</b> {user.full_name} (@{user.username or 'No_Username'})\n"
@@ -158,7 +181,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     photo_id = update.message.photo[-1].file_id
     await context.bot.send_photo(chat_id=ADMIN_ID, photo=photo_id, caption=caption_for_admin, parse_mode='HTML', reply_markup=reply_markup)
 
-# --- ADMIN COMMAND HANDLERS ---
+# --- ADMIN COMMANDS ---
 async def add_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id != ADMIN_ID:
@@ -167,7 +190,7 @@ async def add_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw_text = " ".join(context.args)
     if "|" not in raw_text:
         await update.message.reply_text(
-            "<b>Format:</b>\n<code>/addfile Name | Price | IMDB | File_Link_or_Msg | Details</code>",
+            "<b>Format:</b>\n<code>/addfile Name | Price | IMDB | Private_Channel_Post_Link | Details</code>",
             parse_mode='HTML'
         )
         return
@@ -208,6 +231,6 @@ if __name__ == '__main__':
     bot_app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     bot_app.add_handler(CommandHandler("addfile", add_file))
 
-    print("Bot is starting Auto Delivery System...")
+    print("Bot is starting Direct Video File Delivery...")
     bot_app.run_polling()
     
