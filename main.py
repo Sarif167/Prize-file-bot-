@@ -11,28 +11,37 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "YOUR_ADMIN_USERNAME")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "123456789"))  # Numeric Telegram User ID
 UPI_ID = os.environ.get("UPI_ID", "YOUR_UPI_ID@upi")
+CHANNEL_ID = os.environ.get("CHANNEL_ID", "@YourChannelUsername")  # E.g. @my_movie_channel or -100123456789
 PORT = int(os.environ.get("PORT", 8080))
 
 DATA_FILE = "files_data.json"
+USERS_FILE = "users_data.json"
 USER_SELECTIONS = {}  # User tracking for payment screenshots
 
 # --- DATA LOAD / SAVE FUNCTIONS ---
-def load_files():
-    if os.path.exists(DATA_FILE):
+def load_json(filename):
+    if os.path.exists(filename):
         try:
-            with open(DATA_FILE, "r", encoding="utf-8") as f:
+            with open(filename, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception:
-            return {}
-    return {}
+            return {} if "files" in filename else []
+    return {} if "files" in filename else []
 
-def save_files(data):
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
+def save_json(filename, data):
+    with open(filename, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=4, ensure_ascii=False)
+
+def add_user(user_id):
+    users = load_json(USERS_FILE)
+    if not isinstance(users, list):
+        users = []
+    if user_id not in users:
+        users.append(user_id)
+        save_json(USERS_FILE, users)
 
 # Telegram Channel Link Parser Helper
 def parse_telegram_link(link):
-    # Example link: https://t.me/c/2076498781/8712 or https://t.me/channelname/8712
     pattern = r"https://t\.me/(?:c/)?([^/]+)/(\d+)"
     match = re.search(pattern, link)
     if match:
@@ -59,7 +68,10 @@ def run_flask():
 
 # --- USER HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    files_data = load_files()
+    user_id = update.effective_user.id
+    add_user(user_id)
+
+    files_data = load_json(DATA_FILE)
     keyboard = []
 
     if not files_data:
@@ -78,8 +90,9 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
-    files_data = load_files()
+    files_data = load_json(DATA_FILE)
     user_id = query.from_user.id
+    add_user(user_id)
 
     if data.startswith("file_"):
         file_id = data.split("_")[1]
@@ -119,9 +132,8 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("<b>👋 Main Menu:</b>\nMovie select karein:", parse_mode='HTML', reply_markup=reply_markup)
 
     elif data.startswith("approve_"):
-        # Format: approve_USERID_FILEID
         _, target_user_id, file_id = data.split("_")
-        files_data = load_files()
+        files_data = load_json(DATA_FILE)
 
         if file_id in files_data:
             file_info = files_data[file_id]
@@ -141,17 +153,17 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                     await query.edit_message_caption(caption=query.message.caption + "\n\n✅ <b>APPROVED & DIRECT VIDEO FILE SENT TO MEMBER!</b>")
                 else:
-                    # Fallback text message if link parsing fails
                     await context.bot.send_message(chat_id=int(target_user_id), text=f"🎉 <b>Payment Verified!</b>\n\nLink: {file_link}", parse_mode='HTML')
                     await query.edit_message_caption(caption=query.message.caption + "\n\n⚠️ Approved with Link (Parsing Failed)")
             except Exception as e:
-                await query.edit_message_caption(caption=query.message.caption + f"\n\n❌ Error sending video file: {str(e)}\n\n<i>Make sure Bot is Admin in your Private Channel!</i>")
+                await query.edit_message_caption(caption=query.message.caption + f"\n\n❌ Error sending video file: {str(e)}")
 
 # --- PHOTO RECEIVER ---
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id
-    files_data = load_files()
+    add_user(user_id)
+    files_data = load_json(DATA_FILE)
 
     if user_id == ADMIN_ID:
         return
@@ -203,7 +215,7 @@ async def add_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_link = parts[3].strip()
         details = parts[4].strip() if len(parts) > 4 else "HD Movie"
 
-        files_data = load_files()
+        files_data = load_json(DATA_FILE)
         new_id = str(len(files_data) + 1)
 
         files_data[new_id] = {
@@ -214,10 +226,89 @@ async def add_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "details": details
         }
 
-        save_files(files_data)
-        await update.message.reply_text(f"✅ <b>Movie Added!</b>\nID: {new_id} | Name: {name}", parse_mode='HTML')
+        save_json(DATA_FILE, files_data)
+
+        # --- AUTO POST TO PUBLIC CHANNEL ---
+        bot_info = await context.bot.get_me()
+        bot_username = bot_info.username
+
+        channel_msg = (
+            f"🎬 <b>{name}</b>\n\n"
+            f"💰 <b>Price:</b> {price}\n"
+            f"⭐ <b>IMDB Info:</b> <a href='{imdb}'>Click Here</a>\n"
+            f"📝 <b>Quality:</b> {details}\n\n"
+            f"⚡ <i>Instant Auto Delivery Bot se buy karne ke liye niche button par click karein:</i>"
+        )
+
+        channel_keyboard = [
+            [InlineKeyboardButton("🛒 Buy Movie via Bot", url=f"https://t.me/{bot_username}?start=file_{new_id}")]
+        ]
+        
+        try:
+            await context.bot.send_message(
+                chat_id=CHANNEL_ID,
+                text=channel_msg,
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup(channel_keyboard)
+            )
+            posted_status = "✅ Posted to Channel Successfully!"
+        except Exception as ch_err:
+            posted_status = f"⚠️ Added to bot, but Channel Post failed: {str(ch_err)}"
+
+        await update.message.reply_text(f"✅ <b>Movie Added!</b>\nID: {new_id} | Name: {name}\n\n{posted_status}", parse_mode='HTML')
+
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {str(e)}")
+
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    
+    users = load_json(USERS_FILE)
+    files = load_json(DATA_FILE)
+    
+    total_users = len(users) if isinstance(users, list) else 0
+    total_files = len(files) if isinstance(files, dict) else 0
+
+    msg = (
+        f"📊 <b>BOT STATS & OVERVIEW</b>\n\n"
+        f"👥 <b>Total Users:</b> <code>{total_users}</code>\n"
+        f"🎬 <b>Total Movies Added:</b> <code>{total_files}</code>"
+    )
+    await update.message.reply_text(msg, parse_mode='HTML')
+
+async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    users = load_json(USERS_FILE)
+    if not users or not isinstance(users, list):
+        await update.message.reply_text("❌ Total users: 0")
+        return
+
+    reply_to = update.message.reply_to_message
+    broadcast_text = " ".join(context.args)
+
+    if not reply_to and not broadcast_text:
+        await update.message.reply_text("⚠️ Message reply karein ya `/broadcast Hello Friends` likhein.", parse_mode='HTML')
+        return
+
+    await update.message.reply_text(f"⏳ Broadcasting to {len(users)} users...")
+
+    success = 0
+    failed = 0
+
+    for u_id in users:
+        try:
+            if reply_to:
+                await context.bot.copy_message(chat_id=u_id, from_chat_id=update.effective_chat.id, message_id=reply_to.message_id)
+            else:
+                await context.bot.send_message(chat_id=u_id, text=broadcast_text, parse_mode='HTML')
+            success += 1
+        except Exception:
+            failed += 1
+
+    await update.message.reply_text(f"✅ <b>Broadcast Completed!</b>\n\n🟢 Success: {success}\n🔴 Failed/Blocked: {failed}", parse_mode='HTML')
 
 # --- MAIN RUNNER ---
 if __name__ == '__main__':
@@ -230,7 +321,9 @@ if __name__ == '__main__':
     bot_app.add_handler(CallbackQueryHandler(button_click))
     bot_app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     bot_app.add_handler(CommandHandler("addfile", add_file))
+    bot_app.add_handler(CommandHandler("stats", stats))
+    bot_app.add_handler(CommandHandler("broadcast", broadcast))
 
-    print("Bot is starting Direct Video File Delivery...")
+    print("Bot is running fully automated with Broadcast & Auto Channel Post...")
     bot_app.run_polling()
-    
+        
