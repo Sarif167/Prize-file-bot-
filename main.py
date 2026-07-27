@@ -11,7 +11,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "YOUR_ADMIN_USERNAME")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "123456789"))  # Numeric Telegram User ID
 UPI_ID = os.environ.get("UPI_ID", "YOUR_UPI_ID@upi")
-CHANNEL_ID = os.environ.get("CHANNEL_ID", "@YourChannelUsername")  # E.g. @my_movie_channel or -100123456789
+CHANNEL_ID = os.environ.get("CHANNEL_ID", "")  # Optional: @YourChannelUsername or -100xxxxxxxxx
 PORT = int(os.environ.get("PORT", 8080))
 
 DATA_FILE = "files_data.json"
@@ -76,15 +76,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not files_data:
         msg = "<b>👋 Welcome to Movie Store Bot!</b>\n\n<i>Abhi koi movie available nahi hai.</i>"
+        keyboard.append([InlineKeyboardButton("💬 Admin Support", url=f"https://t.me/{ADMIN_USERNAME}")])
+        await update.message.reply_text(msg, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
     else:
         for f_id, f_data in files_data.items():
             keyboard.append([InlineKeyboardButton(f"🎬 {f_data['name']} - {f_data['price']}", callback_data=f"file_{f_id}")])
+        
+        keyboard.append([InlineKeyboardButton("💬 Admin Support", url=f"https://t.me/{ADMIN_USERNAME}")])
         msg = "<b>👋 Welcome to Movie Store Bot!</b>\n\nNiche di gayi list me se movie select karein:"
+        reply_markup = InlineKeyboardMarkup(keyboard)
 
-    keyboard.append([InlineKeyboardButton("💬 Admin Support", url=f"https://t.me/{ADMIN_USERNAME}")])
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    await update.message.reply_text(msg, parse_mode='HTML', reply_markup=reply_markup)
+        # Send start message
+        await update.message.reply_text(msg, parse_mode='HTML', reply_markup=reply_markup)
 
 async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -103,15 +106,19 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             price_number = ''.join(filter(str.isdigit, selected["price"]))
             qr_url = f"https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=upi://pay?pa={UPI_ID}&pn=MovieStore&am={price_number}"
 
+            poster_url = selected.get("poster", qr_url)
+            imdb_link = selected.get("imdb", "N/A")
+            details = selected.get("details", "HD Movie")
+
             caption = (
                 f"🎬 <b>Movie Name:</b> {selected['name']}\n"
+                f"🗣️ <b>Language & Quality:</b> {details}\n"
                 f"💰 <b>Price:</b> {selected['price']}\n"
-                f"⭐ <b>IMDB Link:</b> <a href='{selected['imdb']}'>Click Here</a>\n\n"
-                f"📝 <b>Details:</b>\n{selected.get('details', 'HD Movie')}\n\n"
+                f"⭐ <b>IMDB Info:</b> <a href='{imdb_link}'>Click Here To Check IMDB</a>\n\n"
                 f"💳 <b>Payment Details:</b>\n"
                 f"<b>UPI ID:</b> <code>{UPI_ID}</code>\n\n"
                 f"📌 <b>Direct Video Paane Ke Liye:</b>\n"
-                f"1. QR code scan karke {selected['price']} pay karein.\n"
+                f"1. Upar QR code scan karke {selected['price']} pay karein.\n"
                 f"2. <b>Payment ka Screenshot ISI BOT CHAT me photo bhej dein.</b>\n"
                 f"3. Verification hote hi Bot aapko Direct Video File bhej dega."
             )
@@ -119,7 +126,10 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard = [[InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_menu")]]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
-            await query.message.reply_photo(photo=qr_url, caption=caption, parse_mode='HTML', reply_markup=reply_markup)
+            try:
+                await query.message.reply_photo(photo=poster_url, caption=caption, parse_mode='HTML', reply_markup=reply_markup)
+            except Exception:
+                await query.message.reply_photo(photo=qr_url, caption=caption, parse_mode='HTML', reply_markup=reply_markup)
 
     elif data == "back_menu":
         keyboard = []
@@ -182,6 +192,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👤 <b>User:</b> {user.full_name} (@{user.username or 'No_Username'})\n"
         f"🆔 <b>User ID:</b> <code>{user_id}</code>\n"
         f"🎬 <b>Selected Movie:</b> {selected_movie['name']}\n"
+        f"🗣️ <b>Details:</b> {selected_movie.get('details', 'HD Movie')}\n"
         f"💰 <b>Price:</b> {selected_movie['price']}"
     )
 
@@ -202,7 +213,7 @@ async def add_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw_text = " ".join(context.args)
     if "|" not in raw_text:
         await update.message.reply_text(
-            "<b>Format:</b>\n<code>/addfile Name | Price | IMDB | Private_Channel_Post_Link | Details</code>",
+            "<b>Format:</b>\n<code>/addfile Name | Price | Poster_URL | Video_Link | Language_Quality | IMDB_Link</code>",
             parse_mode='HTML'
         )
         return
@@ -211,9 +222,10 @@ async def add_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parts = raw_text.split("|")
         name = parts[0].strip()
         price = parts[1].strip()
-        imdb = parts[2].strip()
+        poster = parts[2].strip()
         file_link = parts[3].strip()
-        details = parts[4].strip() if len(parts) > 4 else "HD Movie"
+        details = parts[4].strip() if len(parts) > 4 else "Hindi - HD"
+        imdb = parts[5].strip() if len(parts) > 5 else "https://imdb.com"
 
         files_data = load_json(DATA_FILE)
         new_id = str(len(files_data) + 1)
@@ -221,9 +233,10 @@ async def add_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         files_data[new_id] = {
             "name": name,
             "price": price,
-            "imdb": imdb,
+            "poster": poster,
             "file_link": file_link,
-            "details": details
+            "details": details,
+            "imdb": imdb
         }
 
         save_json(DATA_FILE, files_data)
@@ -234,9 +247,9 @@ async def add_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         channel_msg = (
             f"🎬 <b>{name}</b>\n\n"
+            f"🗣️ <b>Language & Quality:</b> {details}\n"
             f"💰 <b>Price:</b> {price}\n"
-            f"⭐ <b>IMDB Info:</b> <a href='{imdb}'>Click Here</a>\n"
-            f"📝 <b>Quality:</b> {details}\n\n"
+            f"⭐ <b>IMDB Link:</b> <a href='{imdb}'>Click Here</a>\n\n"
             f"⚡ <i>Instant Auto Delivery Bot se buy karne ke liye niche button par click karein:</i>"
         )
 
@@ -244,18 +257,21 @@ async def add_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🛒 Buy Movie via Bot", url=f"https://t.me/{bot_username}?start=file_{new_id}")]
         ]
         
-        try:
-            await context.bot.send_message(
-                chat_id=CHANNEL_ID,
-                text=channel_msg,
-                parse_mode='HTML',
-                reply_markup=InlineKeyboardMarkup(channel_keyboard)
-            )
-            posted_status = "✅ Posted to Channel Successfully!"
-        except Exception as ch_err:
-            posted_status = f"⚠️ Added to bot, but Channel Post failed: {str(ch_err)}"
+        posted_status = "ℹ️ Channel ID not configured."
+        if CHANNEL_ID.strip():
+            try:
+                await context.bot.send_photo(
+                    chat_id=CHANNEL_ID,
+                    photo=poster,
+                    caption=channel_msg,
+                    parse_mode='HTML',
+                    reply_markup=InlineKeyboardMarkup(channel_keyboard)
+                )
+                posted_status = "✅ Posted to Channel Successfully!"
+            except Exception as ch_err:
+                posted_status = f"⚠️ Added to bot, but Channel Post failed: {str(ch_err)}"
 
-        await update.message.reply_text(f"✅ <b>Movie Added!</b>\nID: {new_id} | Name: {name}\n\n{posted_status}", parse_mode='HTML')
+        await update.message.reply_text(f"✅ <b>Movie Added!</b>\nID: {new_id}\nName: {name}\nLanguage & Quality: {details}\n\n{posted_status}", parse_mode='HTML')
 
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {str(e)}")
@@ -324,6 +340,6 @@ if __name__ == '__main__':
     bot_app.add_handler(CommandHandler("stats", stats))
     bot_app.add_handler(CommandHandler("broadcast", broadcast))
 
-    print("Bot is running fully automated with Broadcast & Auto Channel Post...")
+    print("Bot is running fully automated with Poster & Details...")
     bot_app.run_polling()
-        
+    
