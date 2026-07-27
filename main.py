@@ -11,7 +11,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "YOUR_ADMIN_USERNAME")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "123456789"))  # Numeric Telegram User ID
 UPI_ID = os.environ.get("UPI_ID", "YOUR_UPI_ID@upi")
-CHANNEL_ID = os.environ.get("CHANNEL_ID", "")  # Optional: @YourChannelUsername or -100xxxxxxxxx
+CHANNEL_ID = os.environ.get("CHANNEL_ID", "-1002564797463")  # Optional: @YourChannelUsername or -100xxxxxxxxx
 PORT = int(os.environ.get("PORT", 8080))
 
 DATA_FILE = "files_data.json"
