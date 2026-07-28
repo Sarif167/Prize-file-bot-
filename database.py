@@ -1,7 +1,6 @@
-# database.py
-
 import sqlite3
-from config import DB_NAME
+
+DB_NAME = "movie_bot.db"
 
 
 def init_db():
@@ -13,16 +12,17 @@ def init_db():
         """
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
-            points INTEGER DEFAULT 0,
-            referred_by INTEGER
+            referrer_id INTEGER,
+            points INTEGER DEFAULT 0
         )
     """
     )
 
-    # Batch Files Table (Store multiple files for a single movie code)
+    # Movie Batches Table
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS movie_batches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
             movie_id TEXT,
             file_id TEXT
         )
@@ -37,22 +37,22 @@ def add_user(user_id, referrer_id=None):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
 
-    cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+    cursor.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
     user = cursor.fetchone()
 
     if not user:
         cursor.execute(
-            "INSERT INTO users (user_id, points, referred_by) VALUES (?, 0, ?)",
+            "INSERT INTO users (user_id, referrer_id, points) VALUES (?, ?, 0)",
             (user_id, referrer_id),
         )
+
         if referrer_id and referrer_id != user_id:
-            # Add 1 Point/Credit to referrer
             cursor.execute(
                 "UPDATE users SET points = points + 1 WHERE user_id = ?",
                 (referrer_id,),
             )
-        conn.commit()
 
+    conn.commit()
     conn.close()
 
 
@@ -60,17 +60,18 @@ def get_points(user_id):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("SELECT points FROM users WHERE user_id = ?", (user_id,))
-    res = cursor.fetchone()
+    row = cursor.fetchone()
     conn.close()
-    return res[0] if res else 0
+    return row[0] if row else 0
 
 
 def deduct_point(user_id):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute(
-        "UPDATE users SET points = points - 1 WHERE user_id = ?", (user_id,)
+        "UPDATE users SET points = points - 1 WHERE user_id = ? AND points > 0",
+        (user_id,),
     )
     conn.commit()
     conn.close()
-  
+    
