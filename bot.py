@@ -1,24 +1,8 @@
 import asyncio
-import datetime
 import os
-import sqlite3
 from threading import Thread
-from flask import Flask
-import requests
-from config import (
-    API_HASH,
-    API_ID,
-    BOT_TOKEN,
-    BOT_USERNAME,
-    DB_NAME,
-    DEV_ADMIN_USERNAME,
-    HOW_TO_VERIFY_URL,
-    MAIN_CHANNEL,
-    SHORTENER_API,
-    SHORTENER_URL,
-    START_PHOTO,
-)
-from database import add_user, deduct_point, get_points, init_db
+from flask import Flask, request
+from motor.motor_asyncio import AsyncIOMotorClient
 from pyrogram import Client, filters
 from pyrogram.types import (
     CallbackQuery,
@@ -26,16 +10,42 @@ from pyrogram.types import (
     InlineKeyboardMarkup,
     Message,
 )
+from config import (
+    API_HASH,
+    API_ID,
+    BOT_TOKEN,
+    BOT_USERNAME,
+    DEV_ADMIN_USERNAME,
+    MAIN_CHANNEL,
+    MONGO_URL,
+    START_PHOTO,
+)
 
 # ==========================================
-# 1. FLASK SERVER (Koyeb Health Check)
+# 1. FLASK SERVER & WEBHOOK (Auto Payment)
 # ==========================================
 web_app = Flask("")
 
 
 @web_app.route("/")
 def home():
-    return "Bot is Running Successfully!"
+    return "Bot is Running Successfully with Auto Gateway!"
+
+
+# Ye webhook route aapke UPI Gateway se payment success hone par hit hoga
+@web_app.route("/payment-webhook", methods=["POST"])
+def payment_webhook():
+    data = request.json
+    # Gateway se aane wala data (Example: user_id, txn_id, status)
+    user_id = data.get("user_id")
+    status = data.get("status")
+
+    if status == "SUCCESS" and user_id:
+        # Background loop me database update karne ke liye
+        # (Yahan aap async task ya database direct update kar sakte hain)
+        return {"status": "success"}, 200
+
+    return {"status": "failed"}, 400
 
 
 def run_flask():
@@ -50,22 +60,27 @@ def keep_alive():
 
 
 # ==========================================
-# 2. CLIENT INITIALIZATION
+# 2. CLIENT & MONGODB INITIALIZATION
 # ==========================================
 app = Client("MovieStoreBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-VERIFIED_USERS = {}
+mongo_client = AsyncIOMotorClient(MONGO_URL)
+db = mongo_client["MovieStoreBotDB"]
+users_col = db["users"]
+files_col = db["files"]
 
 
-def get_short_url(long_url):
-    try:
-        response = requests.get(
-            f"{SHORTENER_URL}?api={SHORTENER_API}&url={long_url}"
-        )
-        data = response.json()
-        return data.get("shorturl", long_url)
-    except Exception:
-        return long_url
+async def get_user(user_id):
+    user = await users_col.find_one({"user_id": user_id})
+    if not user:
+        user = {
+            "user_id": user_id,
+            "points": 0,
+            "referred_count": 0,
+            "is_premium": False,
+        }
+        await users_col.insert_one(user)
+    return user
 
 
 START_TEXT = """
@@ -75,110 +90,83 @@ START_TEXT = """
 
 🎬 **Main Features:**
 • 🚀 High-Speed Direct Movie Downloads
-• 🎁 **Refer & Earn:** Per refer = 1 Free Movie Access
-• 📺 Multiple Qualities in 1 Click!
+• 🎁 **Refer & Earn:** Share with **5 Friends** = Get 1 Free Movie Access!
+• 💎 **Automatic Premium:** Instant Activation via UPI Gateway!
 
-💎 **Your Free Credits:** `{points} Points`
+📊 **Your Account Status:**
+• 👤 Status: `{status}`
+• 💎 Credits: `{points} / 5 Points`
 
 👇 *Niche diye gaye buttons se access karein:*
 """
 
 
 # ==========================================
-# 3. DIRECT FORWARD FILE ADD COMMAND
+# 3. FILE STORE BOT STYLE (Auto Link Generator)
 # ==========================================
-# Forwarded File par Reply karke ya Caption me Command likh kar Save karne ke liye
 @app.on_message(
-    filters.command("addbatch")
-    & (filters.document | filters.video | filters.reply)
-    & filters.private
+    (filters.document | filters.video) & filters.private & ~filters.me
 )
-async def add_batch_direct(client: Client, message: Message):
-    args = message.text.split() if message.text else []
-
-    # Agar caption me command likha hai
-    if not args and message.caption:
-        args = message.caption.split()
-
-    if len(args) < 2:
+async def store_file_and_get_link(client: Client, message: Message):
+    if message.from_user.username != DEV_ADMIN_USERNAME:
         await message.reply_text(
-            "⚠️ **Wrong Format!**\n\n"
-            "**Kaise Add Karein:**\n"
-            "1️⃣ Database Channel se Video bot par **Forward** karein.\n"
-            "2️⃣ Forward ki hui file par Reply karke likhein: `/addbatch MOVIE_ID`\n"
-            "*(Ya fir video forward karte waqt caption me likhein `/addbatch MOVIE_ID`)*"
+            "❌ Aap Admin nahi hain, isliye files store nahi kar sakte."
         )
         return
 
-    movie_id = args[1]
-    target_msg = message.reply_to_message if message.reply_to_message else message
-
-    # File ID Check
-    file_id = None
-    if target_msg.document:
-        file_id = target_msg.document.file_id
-    elif target_msg.video:
-        file_id = target_msg.video.file_id
-
-    if not file_id:
-        await message.reply_text(
-            "❌ Forwarded message me koi Video ya Document file nahi mili!"
-        )
-        return
-
-    # Save to SQLite Database
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute(
-        "INSERT INTO movie_batches (movie_id, file_id) VALUES (?, ?)",
-        (movie_id, file_id),
+    file_id = (
+        message.document.file_id if message.document else message.video.file_id
     )
-    conn.commit()
-
-    # Total files added check
-    cursor.execute(
-        "SELECT COUNT(*) FROM movie_batches WHERE movie_id = ?", (movie_id,)
+    file_name = (
+        message.document.file_name
+        if message.document
+        else "Movie / Video File"
     )
-    total_added = cursor.fetchone()[0]
-    conn.close()
+
+    import random
+    import string
+
+    unique_code = "".join(
+        random.choices(string.ascii_letters + string.digits, k=8)
+    )
+
+    await files_col.insert_one(
+        {"code": unique_code, "file_id": file_id, "file_name": file_name}
+    )
+    share_link = f"https://t.me/{BOT_USERNAME}?start=file_{unique_code}"
 
     await message.reply_text(
-        f"✅ **File Saved Successfully!**\n\n"
-        f"🎬 **Movie ID:** `{movie_id}`\n"
-        f"📦 **Total Files in this ID:** `{total_added}`"
-    )
-
-
-# Manual Multi-ID Add (Backup Command)
-@app.on_message(filters.command("addids") & filters.private)
-async def add_batch_manual_ids(client: Client, message: Message):
-    args = message.text.split()
-    if len(args) < 3:
-        await message.reply_text(
-            "⚠️ **Usage:** `/addids <movie_id> <file_id_1> <file_id_2>`"
-        )
-        return
-
-    movie_id = args[1]
-    file_ids = args[2:]
-
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    for f_id in file_ids:
-        cursor.execute(
-            "INSERT INTO movie_batches (movie_id, file_id) VALUES (?, ?)",
-            (movie_id, f_id),
-        )
-    conn.commit()
-    conn.close()
-
-    await message.reply_text(
-        f"✅ Added `{len(file_ids)}` files manually for ID: `{movie_id}`"
+        f"✅ **File Successfully Stored!**\n\n"
+        f"📄 **File:** `{file_name}`\n\n"
+        f"🔗 **Shareable Link (Channel ke liye):**\n`{share_link}`"
     )
 
 
 # ==========================================
-# 4. COMMAND HANDLER (/start)
+# 4. ADMIN COMMAND: MANUAL / AUTO PREMIUM
+# ==========================================
+@app.on_message(filters.command("addpremium") & filters.private)
+async def add_premium(client: Client, message: Message):
+    if message.from_user.username != DEV_ADMIN_USERNAME:
+        return
+    args = message.text.split()
+    if len(args) < 2:
+        await message.reply_text("⚠️ **Usage:** `/addpremium <user_id>`")
+        return
+
+    target_user_id = int(args[1])
+    await users_col.update_one(
+        {"user_id": target_user_id},
+        {"$set": {"is_premium": True}},
+        upsert=True,
+    )
+    await message.reply_text(
+        f"✅ **User `{target_user_id}` is now a Premium Member!**"
+    )
+
+
+# ==========================================
+# 5. START COMMAND & FILE DELIVERY LOGIC
 # ==========================================
 @app.on_message(filters.command("start"))
 async def start_cmd(client: Client, message: Message):
@@ -186,76 +174,72 @@ async def start_cmd(client: Client, message: Message):
     first_name = message.from_user.first_name
     text_args = message.text.split()
 
-    # Referral Check
-    referrer = None
+    # Referral Tracking
     if len(text_args) > 1 and text_args[1].startswith("ref_"):
         try:
-            referrer = int(text_args[1].replace("ref_", ""))
+            referrer_id = int(text_args[1].replace("ref_", ""))
+            if referrer_id != user_id:
+                existing_user = await users_col.find_one({"user_id": user_id})
+                if not existing_user:
+                    await users_col.update_one(
+                        {"user_id": referrer_id},
+                        {"$inc": {"referred_count": 1, "points": 1}},
+                        upsert=True,
+                    )
         except ValueError:
             pass
 
-    add_user(user_id, referrer)
+    user_data = await get_user(user_id)
 
-    # Verification Handler
-    if len(text_args) > 1 and text_args[1].startswith("verify_"):
-        VERIFIED_USERS[user_id] = datetime.datetime.now() + datetime.timedelta(
-            hours=24
-        )
-        await message.reply_text(
-            f"🎉 **Congratulations {first_name}!**\n\nVerification successful! Aapko 24 Hours ka free access mil gaya hai."
-        )
-        return
+    # File Delivery Logic
+    if len(text_args) > 1 and text_args[1].startswith("file_"):
+        file_code = text_args[1].replace("file_", "")
+        file_data = await files_col.find_one({"code": file_code})
 
-    # Movie Access Delivery
-    if len(text_args) > 1 and (
-        text_args[1].startswith("get_") or text_args[1].startswith("refget_")
-    ):
-        param = text_args[1]
-        movie_id = param.split("_")[1]
+        if file_data:
+            is_premium = user_data.get("is_premium", False)
+            points = user_data.get("points", 0)
 
-        if param.startswith("refget_"):
-            points = get_points(user_id)
-            if points < 1:
+            if is_premium:
                 await message.reply_text(
-                    "❌ **Insufficient Points!**\n\nDosto ko refer karein ya Shortener Verify karein."
+                    "👑 **Premium Member Detected!** Direct Downloading..."
+                )
+                await message.reply_document(file_data["file_id"])
+                return
+
+            if points < 5:
+                referral_link = f"https://t.me/{BOT_USERNAME}?start=ref_{user_id}"
+                await message.reply_text(
+                    f"🔒 **Locked Movie File!**\n\n"
+                    f"❌ Aapke paas `{points}/5 Points` hain.\n\n"
+                    f"👇 **2 Ways to Unlock:**\n"
+                    f"1️⃣ **Free Way:** Share link with **5 Friends**\n👉 `{referral_link}`\n\n"
+                    f"2️⃣ **Instant Automatic Way:** Buy **Auto-Premium** via Gateway!"
                 )
                 return
-            deduct_point(user_id)
 
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT file_id FROM movie_batches WHERE movie_id = ?", (movie_id,)
-        )
-        files = cursor.fetchall()
-        conn.close()
-
-        if files:
-            await message.reply_text(
-                f"📦 **Sending All Qualities ({len(files)} Files)...**"
+            await users_col.update_one(
+                {"user_id": user_id}, {"$inc": {"points": -5}}
             )
-            for file_item in files:
-                await message.reply_document(file_item[0])
-                await asyncio.sleep(1)
+            await message.reply_text(
+                "🎉 **5 Referrals complete!** File unlocked successfully."
+            )
+            await message.reply_document(file_data["file_id"])
             return
         else:
-            await message.reply_text("⚠️ No files found for this movie.")
+            await message.reply_text("⚠️ File not found or expired.")
             return
 
-    verify_link = f"https://t.me/{BOT_USERNAME}?start=verify_{user_id}"
-    short_verify_link = get_short_url(verify_link)
-    user_points = get_points(user_id)
+    points = user_data.get("points", 0)
+    is_premium = user_data.get("is_premium", False)
+    status_str = "👑 Premium Member" if is_premium else "🆓 Free Member"
 
     buttons = InlineKeyboardMarkup(
         [
             [
                 InlineKeyboardButton(
-                    "🔓 Free Access (Verify Shortener)", url=short_verify_link
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "❓ How to Verify Free (Tutorial)", callback_data="how_to_verify"
+                    "💎 Buy Auto-Premium (Instant Pay)",
+                    callback_data="pay_gateway",
                 )
             ],
             [
@@ -268,54 +252,61 @@ async def start_cmd(client: Client, message: Message):
                     "📢 Main Channel", url=MAIN_CHANNEL
                 ),
                 InlineKeyboardButton(
-                    "👨‍💻 Developer / Admin",
-                    url=f"https://t.me/{DEV_ADMIN_USERNAME}",
+                    "👨‍💻 Support", url=f"https://t.me/{DEV_ADMIN_USERNAME}"
                 ),
             ],
-            [InlineKeyboardButton("❓ Help", callback_data="help_btn")],
         ]
     )
 
     await message.reply_photo(
         photo=START_PHOTO,
         caption=START_TEXT.format(
-            first_name=first_name, points=user_points
+            first_name=first_name, points=points, status=status_str
         ),
         reply_markup=buttons,
     )
 
 
 # ==========================================
-# 5. CALLBACK HANDLERS
+# 6. CALLBACK HANDLERS (Auto Gateway Link)
 # ==========================================
 @app.on_callback_query()
 async def callback_handler(client: Client, query: CallbackQuery):
     user_id = query.from_user.id
 
-    if query.data == "how_to_verify":
-        verify_guide_text = """
-📖 **How to Verify Free Guide:**
+    if query.data == "pay_gateway":
+        # Yahan aap apne UPI Gateway (Jaise Upigateway.com ya koi aur) ka payment link generate kar sakte hain
+        # Example Dynamic Payment URL with User ID parameter:
+        gateway_payment_url = (
+            f"https://your-upigateway-domain.com/pay?user_id={user_id}&amount=29"
+        )
 
-1️⃣ **Step 1:** Niche '🔓 Free Access' button par click karein.
-2️⃣ **Step 2:** Shortener page par 10-15 sec wait karke Continue karein.
-3️⃣ **Step 3:** Get Link par click karte hi 24 Hours Free Access mil jayega!
+        gateway_text = """
+💎 **Automatic UPI Gateway Payment**
+
+🚀 **Instant Activation:**
+Niche diye gaye button par click karke Payment karein. Payment successful hote hi bot aapko automatic **Premium Member** bana dega!
+
+💰 **Price:** ₹29 (1 Month Access)
 """
-        guide_buttons = InlineKeyboardMarkup(
+        pay_btn = InlineKeyboardMarkup(
             [
                 [
                     InlineKeyboardButton(
-                        "▶️ Watch Tutorial Video", url=HOW_TO_VERIFY_URL
+                        "💳 Pay Now (Instant UPI)", url=gateway_payment_url
                     )
                 ],
                 [InlineKeyboardButton("🔙 Back to Main", callback_data="back_home")],
             ]
         )
         await query.message.edit_caption(
-            caption=verify_guide_text, reply_markup=guide_buttons
+            caption=gateway_text, reply_markup=pay_btn
         )
 
     elif query.data == "refer_info":
-        user_points = get_points(user_id)
+        user_data = await get_user(user_id)
+        points = user_data.get("points", 0)
+        referred_count = user_data.get("referred_count", 0)
         referral_link = f"https://t.me/{BOT_USERNAME}?start=ref_{user_id}"
 
         refer_text = f"""
@@ -324,7 +315,9 @@ async def callback_handler(client: Client, query: CallbackQuery):
 👉 **Aapka Referral Link:**
 `{referral_link}`
 
-💰 **Current Credits:** `{user_points} Points`
+📊 **Aapke Stats:**
+• Total Referred Friends: `{referred_count}`
+• Current Points: `{points} / 5`
 """
         back_btn = InlineKeyboardMarkup(
             [[InlineKeyboardButton("🔙 Back to Main", callback_data="back_home")]]
@@ -333,23 +326,17 @@ async def callback_handler(client: Client, query: CallbackQuery):
 
     elif query.data == "back_home":
         first_name = query.from_user.first_name
-        user_points = get_points(user_id)
-
-        verify_link = f"https://t.me/{BOT_USERNAME}?start=verify_{user_id}"
-        short_verify_link = get_short_url(verify_link)
+        user_data = await get_user(user_id)
+        points = user_data.get("points", 0)
+        is_premium = user_data.get("is_premium", False)
+        status_str = "👑 Premium Member" if is_premium else "🆓 Free Member"
 
         home_buttons = InlineKeyboardMarkup(
             [
                 [
                     InlineKeyboardButton(
-                        "🔓 Free Access (Verify Shortener)",
-                        url=short_verify_link,
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        "❓ How to Verify Free (Tutorial)",
-                        callback_data="how_to_verify",
+                        "💎 Buy Auto-Premium (Instant Pay)",
+                        callback_data="pay_gateway",
                     )
                 ],
                 [
@@ -363,28 +350,25 @@ async def callback_handler(client: Client, query: CallbackQuery):
                         "📢 Main Channel", url=MAIN_CHANNEL
                     ),
                     InlineKeyboardButton(
-                        "👨‍💻 Developer / Admin",
-                        url=f"https://t.me/{DEV_ADMIN_USERNAME}",
+                        "👨‍💻 Support", url=f"https://t.me/{DEV_ADMIN_USERNAME}"
                     ),
                 ],
-                [InlineKeyboardButton("❓ Help", callback_data="help_btn")],
             ]
         )
         await query.message.edit_caption(
             caption=START_TEXT.format(
-                first_name=first_name, points=user_points
+                first_name=first_name, points=points, status=status_str
             ),
             reply_markup=home_buttons,
         )
 
 
 # ==========================================
-# 6. MAIN RUNNER
+# 7. MAIN RUNNER
 # ==========================================
 if __name__ == "__main__":
-    init_db()
-    print("Starting Flask Server...")
+    print("Starting Flask Server with Webhook Support...")
     keep_alive()
-    print("Bot Running!")
+    print("Bot Successfully Running!")
     app.run()
     
