@@ -54,11 +54,9 @@ def keep_alive():
 # ==========================================
 app = Client("MovieStoreBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# In-Memory Verified Users Cache {user_id: expiry_datetime}
 VERIFIED_USERS = {}
 
 
-# API Call to Shorten URL
 def get_short_url(long_url):
     try:
         response = requests.get(
@@ -70,7 +68,6 @@ def get_short_url(long_url):
         return long_url
 
 
-# Start Message Banner Text Template
 START_TEXT = """
 👋 **Hello {first_name}!**
 
@@ -88,15 +85,39 @@ START_TEXT = """
 
 
 # ==========================================
-# 3. COMMAND HANDLER (/start)
+# 3. INSTANT FILE ID EXTRACTOR (FOR ANY FORWARDED FILE)
 # ==========================================
+@app.on_message(
+    (filters.document | filters.video) & filters.private & ~filters.me
+)
+async def get_file_id(client: Client, message: Message):
+    # Extracts File ID from Video or Document
+    file_id = (
+        message.document.file_id if message.document else message.video.file_id
+    )
+    file_name = (
+        message.document.file_name
+        if message.document
+        else "Video/Movie File"
+    )
+
+    await message.reply_text(
+        f"📄 **File Name:** `{file_name}`\n\n🆔 **File ID:**\n`{file_id}`\n\n*(Is File ID ko copy karke `/addbatch` command me use karein)*"
+    )
+
+
+# ==========================================
+# 4. COMMAND HANDLERS
+# ==========================================
+
+# Command: /start
 @app.on_message(filters.command("start"))
 async def start_cmd(client: Client, message: Message):
     user_id = message.from_user.id
     first_name = message.from_user.first_name
     text_args = message.text.split()
 
-    # A. Check Referral Link (/start ref_123456)
+    # A. Check Referral Link
     referrer = None
     if len(text_args) > 1 and text_args[1].startswith("ref_"):
         try:
@@ -104,10 +125,9 @@ async def start_cmd(client: Client, message: Message):
         except ValueError:
             pass
 
-    # Database me User add karein / Referrer points update karein
     add_user(user_id, referrer)
 
-    # B. Shortener Verification Link Complete Handler (/start verify_123456)
+    # B. Shortener Verification Link Complete Handler
     if len(text_args) > 1 and text_args[1].startswith("verify_"):
         VERIFIED_USERS[user_id] = datetime.datetime.now() + datetime.timedelta(
             hours=24
@@ -117,14 +137,13 @@ async def start_cmd(client: Client, message: Message):
         )
         return
 
-    # C. Movie File Batch Delivery (/start get_MOVIEID ya /start refget_MOVIEID)
+    # C. Movie File Batch Delivery
     if len(text_args) > 1 and (
         text_args[1].startswith("get_") or text_args[1].startswith("refget_")
     ):
         param = text_args[1]
         movie_id = param.split("_")[1]
 
-        # Check if requested via Referral Point
         if param.startswith("refget_"):
             points = get_points(user_id)
             if points < 1:
@@ -132,9 +151,8 @@ async def start_cmd(client: Client, message: Message):
                     "❌ **Insufficient Points!**\n\nAapke paas 0 Points hain. Dosto ko refer karein ya Shortener Verify karein."
                 )
                 return
-            deduct_point(user_id)  # 1 Point Deduct
+            deduct_point(user_id)
 
-        # Fetch All Files (4-7 Files) for this Movie ID
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
         cursor.execute(
@@ -149,18 +167,16 @@ async def start_cmd(client: Client, message: Message):
             )
             for file_item in files:
                 await message.reply_document(file_item[0])
-                await asyncio.sleep(1)  # FloodWait se bachne ke liye delay
+                await asyncio.sleep(1)
             return
         else:
             await message.reply_text("⚠️ No files found for this movie.")
             return
 
-    # Links Setup
     verify_link = f"https://t.me/{BOT_USERNAME}?start=verify_{user_id}"
     short_verify_link = get_short_url(verify_link)
     user_points = get_points(user_id)
 
-    # Main Start Inline Keyboards
     buttons = InlineKeyboardMarkup(
         [
             [
@@ -193,7 +209,6 @@ async def start_cmd(client: Client, message: Message):
         ]
     )
 
-    # Welcome Banner Send Karein
     await message.reply_photo(
         photo=START_PHOTO,
         caption=START_TEXT.format(
@@ -203,24 +218,70 @@ async def start_cmd(client: Client, message: Message):
     )
 
 
+# Command: /addbatch <movie_id> <file_id_1> <file_id_2> ...
+@app.on_message(filters.command("addbatch") & filters.private)
+async def add_batch_files(client: Client, message: Message):
+    args = message.text.split()
+    if len(args) < 3:
+        await message.reply_text(
+            "⚠️ **Wrong Format!**\n\n**Usage:**\n`/addbatch <movie_id> <file_id_1> <file_id_2>`"
+        )
+        return
+
+    movie_id = args[1]
+    file_ids = args[2:]
+
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+
+    for f_id in file_ids:
+        cursor.execute(
+            "INSERT INTO movie_batches (movie_id, file_id) VALUES (?, ?)",
+            (movie_id, f_id),
+        )
+
+    conn.commit()
+    conn.close()
+
+    await message.reply_text(
+        f"✅ **Success!**\n\n`{len(file_ids)}` Files added successfully for Movie ID: `{movie_id}`"
+    )
+
+
+# Command: /stats
+@app.on_message(filters.command("stats") & filters.private)
+async def bot_stats(client: Client, message: Message):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT COUNT(*) FROM users")
+    total_users = cursor.fetchone()[0]
+
+    cursor.execute("SELECT COUNT(DISTINCT movie_id) FROM movie_batches")
+    total_movies = cursor.fetchone()[0]
+
+    conn.close()
+
+    await message.reply_text(
+        f"📊 **Bot Statistics:**\n\n👥 **Total Users:** `{total_users}`\n🎬 **Total Movies Added:** `{total_movies}`"
+    )
+
+
 # ==========================================
-# 4. CALLBACK QUERY HANDLER (BUTTON CLICKS)
+# 5. CALLBACK QUERY HANDLER
 # ==========================================
 @app.on_callback_query()
 async def callback_handler(client: Client, query: CallbackQuery):
     user_id = query.from_user.id
 
-    # 1. How To Verify Guide Button
     if query.data == "how_to_verify":
         verify_guide_text = f"""
 📖 **How to Verify Free (Step-by-Step Guide):**
 
-1️⃣ **Step 1:** Niche diye gaye **'🔓 Free Access (Verify Shortener)'** button par click karein.
-2️⃣ **Step 2:** Khule hue page par 10-15 seconds wait karein aur **'Continue'** par click karein.
-3️⃣ **Step 3:** Captcha complete karein aur **'Get Link'** par click karein.
-4️⃣ **Step 4:** Automatic aap bot me wapas aa jayenge aur aapko **24 Hours ka Free Access** mil jayega!
-
-📺 **Video Tutorial Dekhne ke liye Niche Button par Click Karein:**
+1️⃣ **Step 1:** Niche '🔓 Free Access' button par click karein.
+2️⃣ **Step 2:** Page par 10-15 sec wait karke 'Continue' dabayein.
+3️⃣ **Step 3:** Captcha solve karke 'Get Link' karein.
+4️⃣ **Step 4:** Automatic 24 Hours Access mil jayega!
 """
         guide_buttons = InlineKeyboardMarkup(
             [
@@ -236,7 +297,6 @@ async def callback_handler(client: Client, query: CallbackQuery):
             caption=verify_guide_text, reply_markup=guide_buttons
         )
 
-    # 2. Refer & Earn Info Button
     elif query.data == "refer_info":
         user_points = get_points(user_id)
         referral_link = f"https://t.me/{BOT_USERNAME}?start=ref_{user_id}"
@@ -248,18 +308,12 @@ async def callback_handler(client: Client, query: CallbackQuery):
 `{referral_link}`
 
 💰 **Current Credits:** `{user_points} Points`
-
-✨ **Rules:**
-• Har 1 Friend ke join karne par **1 Point** milega.
-• **1 Point = 1 Complete Movie Bundle** (Sabhi 4-7 Files ek sath).
-• Direct link share karein aur free me movie access karein!
 """
         back_btn = InlineKeyboardMarkup(
             [[InlineKeyboardButton("🔙 Back to Main", callback_data="back_home")]]
         )
         await query.message.edit_caption(caption=refer_text, reply_markup=back_btn)
 
-    # 3. Help Button
     elif query.data == "help_btn":
         help_text = f"""
 ❓ **Need Help?**
@@ -281,7 +335,6 @@ async def callback_handler(client: Client, query: CallbackQuery):
         )
         await query.message.edit_caption(caption=help_text, reply_markup=help_buttons)
 
-    # 4. Back to Home Menu Button
     elif query.data == "back_home":
         first_name = query.from_user.first_name
         user_points = get_points(user_id)
@@ -332,11 +385,12 @@ async def callback_handler(client: Client, query: CallbackQuery):
 
 
 # ==========================================
-# 5. MAIN BOT RUNNER
+# 6. MAIN RUNNER
 # ==========================================
 if __name__ == "__main__":
-    init_db()  # Database setup
-    print("Starting Flask Web Server for Koyeb Health Check...")
-    keep_alive()  # Koyeb TCP Health Check Fix Start
-    print("Bot Successfully Started with All Features!")
-    app.run()  # Run Pyrogram Bot
+    init_db()
+    print("Starting Flask Server for Koyeb Health Check...")
+    keep_alive()
+    print("Bot Successfully Running!")
+    app.run()
+                
